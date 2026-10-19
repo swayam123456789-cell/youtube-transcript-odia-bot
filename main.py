@@ -195,13 +195,19 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     status = await update.message.reply_text("🔎 ଭିଡିଓ ଯାଞ୍ଚ କରୁଛି…")
     try:
-        info = await asyncio.to_thread(get_video_info, url)
-        duration = info.get("duration")
-        title = info.get("title", "YouTube video")
-        if duration is None:
-            await status.edit_text("ଭିଡିଓର ଅବଧି ଯାଞ୍ଚ ହୋଇପାରିଲା ନାହିଁ। ଅନ୍ୟ ଲିଙ୍କ୍ ଚେଷ୍ଟା କରନ୍ତୁ।")
-            return
-        if duration > MAX_SECONDS:
+        # yt-dlp can fail against YouTube even when captions are accessible.
+        # Continue to transcript lookup and enforce the 90-minute limit using
+        # transcript timestamps if metadata duration is unavailable.
+        duration = None
+        title = f"YouTube video ({video_id})"
+        try:
+            info = await asyncio.to_thread(get_video_info, url)
+            duration = info.get("duration")
+            title = info.get("title", title)
+        except Exception:
+            log.exception("yt-dlp metadata lookup failed; falling back to transcript timestamps")
+
+        if duration is not None and duration > MAX_SECONDS:
             await status.edit_text(
                 "❌ ଏହି ଭିଡିଓ ୯୦ ମିନିଟ୍‌ରୁ ଅଧିକ।\n"
                 "ଦୟାକରି ୯୦ ମିନିଟ୍ କିମ୍ବା ତାଠାରୁ କମ୍ ଭିଡିଓ ପଠାନ୍ତୁ।"
@@ -211,18 +217,20 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["video_id"] = video_id
         context.user_data["video_url"] = url
         context.user_data["video_title"] = title
+        context.user_data["video_duration"] = duration
+        duration_label = f"{duration // 60} ମିନିଟ୍" if duration is not None else "Transcript ରୁ ଯାଞ୍ଚ ହେବ"
         await status.edit_text(
-            f"✅ ଭିଡିଓ ଗ୍ରହଣ କରାଗଲା।\n\n🎬 {title}\n"
-            f"⏱️ ଅବଧି: {duration // 60} ମିନିଟ୍\n\nକ'ଣ କରିବାକୁ ଚାହୁଁଛନ୍ତି?",
+            f"✅ ଭିଡିଓ ଲିଙ୍କ୍ ଗ୍ରହଣ କରାଗଲା।\n\n🎬 {title}\n"
+            f"⏱️ ଅବଧି: {duration_label}\n\nକ'ଣ କରିବାକୁ ଚାହୁଁଛନ୍ତି?",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("📄 ମୂଳ Transcript", callback_data="original")],
                 [InlineKeyboardButton("✍️ ଓଡ଼ିଆକୁ ଅନୁବାଦ", callback_data="odia")],
             ])
         )
-    except Exception as exc:
-        log.exception("Video info extraction failed")
+    except Exception:
+        log.exception("Video link processing failed")
         await status.edit_text(
-            "ଭିଡିଓ ଯାଞ୍ଚ କରିହେଲା ନାହିଁ। YouTube ଲିଙ୍କ୍ ସାର୍ବଜନୀନ କି ନାହିଁ ଯାଞ୍ଚ କରି ପୁଣି ଚେଷ୍ଟା କରନ୍ତୁ।"
+            "ଭିଡିଓ ଲିଙ୍କ୍ ପ୍ରୋସେସ୍ କରିହେଲା ନାହିଁ। କିଛି ସମୟ ପରେ ପୁଣି ଚେଷ୍ଟା କରନ୍ତୁ।"
         )
 
 
@@ -240,6 +248,19 @@ async def handle_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
         language, lang_code, snippets = await asyncio.to_thread(fetch_transcript, video_id)
         if not snippets:
             await query.message.reply_text("ଏହି ଭିଡିଓରେ Transcript ମିଳିଲା ନାହିଁ।")
+            return
+
+        # If yt-dlp could not read the duration, infer it from the last
+        # caption timestamp before sending any transcript to the user.
+        transcript_end = max(
+            (s["start"] + s["duration"] for s in snippets),
+            default=0
+        )
+        if transcript_end > MAX_SECONDS:
+            await query.message.reply_text(
+                "❌ ଏହି ଭିଡିଓ ୯୦ ମିନିଟ୍‌ରୁ ଅଧିକ।\n"
+                "ଦୟାକରି ୯୦ ମିନିଟ୍ କିମ୍ବା ତାଠାରୁ କମ୍ ଭିଡିଓ ପଠାନ୍ତୁ।"
+            )
             return
 
         original_text = "\n".join(s["text"] for s in snippets)
@@ -323,3 +344,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+        
